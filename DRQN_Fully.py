@@ -319,7 +319,10 @@ def spr_train(
 
     for t in range(1, k_steps + 1):
         next_encoding = transition_model(stacked)
-        next_encoding = next_encoding[:, : -(t - 1)]  # discard from the back
+        if t == 1:
+            pass  # don't slice if t = 1, want full tensor
+        else:
+            next_encoding = next_encoding[:, : -(t - 1)]  # discard from the back
         online_projection = projection(next_encoding)
         online_prediction = predictor(online_projection)
 
@@ -404,20 +407,21 @@ def train(
     # Multiply Importance Sampling weights to loss
     loss = F.smooth_l1_loss(q_a, targets)
 
-    spr_loss = spr_train(
-        projection,
-        soft_projection,
-        predictor,
-        transition_model,
-        h_ts,
-        h_target,
-        actions,
-        cosine_loss,
-        args,
-        args.k_steps,
-    )
+    if args.use_spr:
+        spr_loss = spr_train(
+            projection,
+            soft_projection,
+            predictor,
+            transition_model,
+            h_ts,
+            h_target,
+            actions,
+            cosine_loss,
+            args,
+            args.k_steps,
+        )
 
-    loss = loss + args.spr_weight * spr_loss
+        loss = loss + args.spr_weight * spr_loss
 
     # Update Network
     optimizer.zero_grad()
@@ -478,6 +482,7 @@ if __name__ == "__main__":
     args.tau = 1e-2
     args.spr_weight = 0.01
     args.k_steps = 2
+    args.use_spr = True
     args.device = torch.device("cuda:1")
 
     buffer_len = int(100000)
@@ -601,7 +606,8 @@ if __name__ == "__main__":
                     batch_size=args.batch_size,
                 )
 
-                losses.append(loss.item())
+                # function already returns the float
+                losses.append(loss)
 
                 if (t + 1) % target_update_period == 0:
                     # Q_target.load_state_dict(Q.state_dict()) <- navie update

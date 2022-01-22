@@ -300,6 +300,6 @@ if __name__ == "__main__":
     plot_path = os.path.join(plot_folder, plot_name)
     plt.savefig(plot_path)
 
-    array_name = f"random_spr_k{args.k_steps}_{args.loss}.npz"
+    array_name = f"random_spr_k{args.k_steps}_{args.loss}"
     array_path = os.path.join(os.path.join(plot_folder, "arrays"), array_name)
     np.save(array_path, losses)
