@@ -235,7 +235,7 @@ if __name__ == "__main__":
     args.k_steps = 4
     args.lr = 5e-5
     args.grad_norm_clip = 10
-    args.loss = "cosine"
+    args.loss = "L1"
 
     online_encoder = ObsEncoder(args)
     transition_model = TransitionModel(args)

@@ -13,284 +13,13 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from torch.utils.tensorboard import SummaryWriter
+import matplotlib.pyplot as plt
 
-
-# Q_network
-class Q_net(nn.Module):
-    """
-    Returns q_vals, h_ts, final_h on __call__
-    """
-
-    def __init__(self, args, state_space=None, action_space=None):
-        super(Q_net, self).__init__()
-
-        # space size check
-        assert (
-            state_space is not None
-        ), "None state_space input: state_space should be selected."
-        assert (
-            action_space is not None
-        ), "None action_space input: action_space should be selected."
-
-        self.args = args
-        self.hidden_space = 64
-        self.state_space = state_space
-        self.action_space = action_space
-
-        self.Linear1 = nn.Linear(self.state_space, self.hidden_space)
-        # self.lstm    = nn.LSTM(self.hidden_space,self.hidden_space, batch_first=True)
-        self.GRU = nn.GRU(self.hidden_space, self.hidden_space, batch_first=True)
-        self.Linear2 = nn.Linear(
-            self.hidden_space, self.action_space
-        )  # serves as QHead
-        self.to(args.device)
-
-    def forward(self, x, h):
-        x = F.relu(self.Linear1(x))
-        # x, (new_h, new_c) = self.lstm(x,(h,c)) # c was passed as param into function
-        h_ts, final_h = self.GRU(x, h)
-        q_vals = self.Linear2(h_ts)
-        # return x, new_h,
-        return q_vals, h_ts, final_h
-
-    def sample_action(self, obs, h, epsilon):
-        output = self.forward(obs, h)
-
-        # if random.random() < epsilon:
-        #     return random.randint(0,1), output[1], output[2]
-        # else:
-        #     return output[0].argmax().item(), output[1] , output[2]
-        if random.random() < epsilon:
-            return random.randint(0, 1), output[1]
-        else:
-            return output[0].argmax().item(), output[1]
-
-    def init_hidden_state(self, batch_size, training=None):
-
-        assert training is not None, "training step parameter should be dtermined"
-
-        # if training is True:
-        #     return torch.zeros([1, batch_size, self.hidden_space]), torch.zeros([1, batch_size, self.hidden_space])
-        # else:
-        #     return torch.zeros([1, 1, self.hidden_space]), torch.zeros([1, 1, self.hidden_space])
-        if training is True:
-            return torch.zeros([1, batch_size, self.hidden_space])
-        else:
-            return torch.zeros([1, 1, self.hidden_space])
-
-
-class TransitionModel(nn.Module):
-    def __init__(self, action_space, args):
-        super().__init__()
-        self.args = args
-        layers = [
-            nn.Linear(args.hidden_space + action_space, args.tran1_dim),
-            nn.ReLU(),
-            nn.Linear(args.tran1_dim, args.tran2_dim),
-            nn.ReLU(),
-            nn.Linear(args.tran2_dim, args.hidden_space),
-        ]
-        self.network = nn.Sequential(*layers)
-        self.train()
-        self.to(args.device)
-
-    def forward(self, x):
-        # stacked = torch.cat(x, action_onehot, dim=1)
-        # stacking done externally
-        next_state = self.network(x)
-
-        return next_state
-
-
-class ProjectionHead(nn.Module):
-    def __init__(self, args):
-        super().__init__()
-        self.args = args
-        self.fc1 = nn.Linear(args.hidden_space, 256)
-        self.fc2 = nn.Linear(256, args.projection_out_dim)
-        self.to(args.device)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-
-        return x
-
-
-class PredictionHead(nn.Module):
-    def __init__(self, args):
-        super().__init__()
-        self.args = args
-        self.fc1 = nn.Linear(args.projection_out_dim, args.prediction_dim)
-        self.fc2 = nn.Linear(args.prediction_dim, args.projection_out_dim)
-        self.to(args.device)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-
-        return x
-
-
-def soft_copy(target, source, tau):
-    """
-    Function performs exponential moving average copy.
-
-    args:
-    -----
-        target (nn.Module): target network that will be a copy of source.
-        source (nn.Module): the source network that serves as the copy.
-        tau (float): controls the rate of copy.
-    """
-    for target_param, param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_(target_param.data * (1.0 - tau) + param.data * tau)
-
-
-def freeze_params(model):
-    """
-    Freeze model params, dont want target encoder to accumulate gradients
-    """
-    for param in model.parameters():
-        param.requires_grad = False
-
-
-def hard_copy(target, source, freeze=True):
-    """
-    Do exact copy, freeze if boolean is passed
-    """
-    for target_param, param in zip(target.parameters(), source.parameters()):
-        target_param.data.copy_(param.data)
-
-    # if freeze is True, we freeze gradients on the target model after copy
-    if freeze:
-        freeze_params(target)
-
-
-def cosine_loss(x1, x2):
-    criterion = torch.nn.CosineSimilarity(dim=1)
-    loss = -criterion(x1, x2).mean()
-
-    return loss
-
-
-def L1_loss(x1, x2):
-    loss = F.smooth_l1_loss(x1, x2)
-
-    return loss
-
-
-class EpisodeMemory:
-    """Episode memory for recurrent agent"""
-
-    def __init__(
-        self,
-        random_update=False,
-        max_epi_num=100,
-        max_epi_len=500,
-        batch_size=1,
-        lookup_step=None,
-    ):
-        self.random_update = random_update  # if False, sequential update
-        self.max_epi_num = max_epi_num
-        self.max_epi_len = max_epi_len
-        self.batch_size = batch_size
-        self.lookup_step = lookup_step
-
-        if (random_update is False) and (self.batch_size > 1):
-            sys.exit(
-                "It is recommend to use 1 batch for sequential update, if you want, erase this code block and modify code"
-            )
-
-        self.memory = collections.deque(maxlen=self.max_epi_num)
-
-    def put(self, episode):
-        self.memory.append(episode)
-
-    def sample(self):
-        sampled_buffer = []
-
-        ##################### RANDOM UPDATE ############################
-        if self.random_update:  # Random upodate
-            sampled_episodes = random.sample(self.memory, self.batch_size)
-
-            check_flag = (
-                True  # check if every sample data to train is larger than batch size
-            )
-            min_step = self.max_epi_len
-
-            for episode in sampled_episodes:
-                min_step = min(
-                    min_step, len(episode)
-                )  # get minimum step from sampled episodes
-
-            for episode in sampled_episodes:
-                if min_step > self.lookup_step:  # sample buffer with lookup_step size
-                    idx = np.random.randint(0, len(episode) - self.lookup_step + 1)
-                    sample = episode.sample(
-                        random_update=self.random_update,
-                        lookup_step=self.lookup_step,
-                        idx=idx,
-                    )
-                    sampled_buffer.append(sample)
-                else:
-                    idx = np.random.randint(
-                        0, len(episode) - min_step + 1
-                    )  # sample buffer with minstep size
-                    sample = episode.sample(
-                        random_update=self.random_update, lookup_step=min_step, idx=idx
-                    )
-                    sampled_buffer.append(sample)
-
-        ##################### SEQUENTIAL UPDATE ############################
-        else:  # Sequential update
-            idx = np.random.randint(0, len(self.memory))
-            sampled_buffer.append(
-                self.memory[idx].sample(random_update=self.random_update)
-            )
-
-        return sampled_buffer, len(sampled_buffer[0]["obs"])  # buffers, sequence_length
-
-    def __len__(self):
-        return len(self.memory)
-
-
-class EpisodeBuffer:
-    """A simple numpy replay buffer."""
-
-    def __init__(self):
-        self.obs = []
-        self.action = []
-        self.reward = []
-        self.next_obs = []
-        self.done = []
-
-    def put(self, transition):
-        self.obs.append(transition[0])
-        self.action.append(transition[1])
-        self.reward.append(transition[2])
-        self.next_obs.append(transition[3])
-        self.done.append(transition[4])
-
-    def sample(
-        self, random_update=False, lookup_step=None, idx=None
-    ) -> Dict[str, np.ndarray]:
-        obs = np.array(self.obs)
-        action = np.array(self.action)
-        reward = np.array(self.reward)
-        next_obs = np.array(self.next_obs)
-        done = np.array(self.done)
-
-        if random_update is True:
-            obs = obs[idx : idx + lookup_step]
-            action = action[idx : idx + lookup_step]
-            reward = reward[idx : idx + lookup_step]
-            next_obs = next_obs[idx : idx + lookup_step]
-            done = done[idx : idx + lookup_step]
-
-        return dict(obs=obs, acts=action, rews=reward, next_obs=next_obs, done=done)
-
-    def __len__(self) -> int:
-        return len(self.obs)
+from networks.drqn import Q_net
+from utils.network_utils import soft_copy, hard_copy, freeze_params
+from networks.spr_networks import TransitionModel, PredictionHead, ProjectionHead
+from utils.losses import cosine_loss, L1_loss
+from memory.replay_buffer import EpisodeBuffer, EpisodeMemory
 
 
 def spr_train(
@@ -335,6 +64,8 @@ def spr_train(
         # currently online_prediction is [64, 7, 16] and target_projection is [64, 8, 16]
         spr_loss_ = loss_function(online_prediction, target_projection)
         spr_loss += spr_loss_
+
+    spr_loss /= k_steps
 
     return spr_loss
 
@@ -407,6 +138,13 @@ def train(
     # Multiply Importance Sampling weights to loss
     loss = F.smooth_l1_loss(q_a, targets)
 
+    if args.loss_fn == "cosine":
+        loss_func = cosine_loss
+    elif args.loss_fn == "L1":
+        loss_func = L1_loss
+    else:
+        raise ValueError("SPR Loss function must be specified")
+
     if args.use_spr:
         spr_loss = spr_train(
             projection,
@@ -416,7 +154,7 @@ def train(
             h_ts,
             h_target,
             actions,
-            cosine_loss,
+            loss_func,
             args,
             args.k_steps,
         )
@@ -428,7 +166,10 @@ def train(
     loss.backward()
     optimizer.step()
 
-    return loss.item()
+    if args.use_spr:
+        return loss.item(), spr_loss.item()
+    else:
+        return loss.item(), 0.0
 
 
 def seed_torch(seed):
@@ -444,29 +185,9 @@ def save_model(model, path="default.pth"):
 
 if __name__ == "__main__":
 
-    # Env parameters
-    model_name = "DRQN_SPR"
     env_name = "CartPole-v1"
-    seed = 1
-    exp_num = "SEED" + "_" + str(seed)
-    suffix = "eps_06"
-
     # Set gym environment
     env = gym.make(env_name)
-
-    if torch.cuda.is_available():
-        device = torch.device("cuda:1")
-
-    # Set the seed
-    np.random.seed(seed)
-    random.seed(seed)
-    seed_torch(seed)
-    env.seed(seed)
-
-    # default `log_dir` is "runs" - we'll be more specific here
-    writer = SummaryWriter(
-        "runs/" + env_name + "_" + model_name + "_" + exp_num + "_" + suffix
-    )
 
     # Set parameters
     args = SimpleNamespace()
@@ -480,9 +201,10 @@ if __name__ == "__main__":
     args.batch_size = 64
     args.lr = 5e-5
     args.tau = 1e-2
-    args.spr_weight = 0.01
-    args.k_steps = 2
+    args.spr_weight = 0.001
+    args.k_steps = 3
     args.use_spr = True
+    args.loss_fn = "L1"
     args.device = torch.device("cuda:1")
 
     buffer_len = int(100000)
@@ -501,6 +223,25 @@ if __name__ == "__main__":
     lookup_step = 15  # If you want to do random update instead of sequential update
     max_epi_len = 128
     max_epi_step = max_step
+    # Env parameters
+    model_name = f"DRQN_SPR_{str(args.k_steps)}_steps"
+    seed = 1
+    exp_num = "SEED" + "_" + str(seed)
+    suffix = f"eps_06_sprweight_001_{args.loss_fn}"
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:1")
+
+    # Set the seed
+    np.random.seed(seed)
+    random.seed(seed)
+    seed_torch(seed)
+    env.seed(seed)
+
+    # default `log_dir` is "runs" - we'll be more specific here
+    writer = SummaryWriter(
+        "runs/" + env_name + "_" + model_name + "_" + exp_num + "_" + suffix
+    )
 
     # projection,
     # soft_projection,
@@ -560,6 +301,7 @@ if __name__ == "__main__":
     # Train
     for i in range(episodes):
         losses = []
+        spr_losses = []
         s = env.reset()
         obs = s  # Use only Position of Cart and Pole
         done = False
@@ -592,7 +334,7 @@ if __name__ == "__main__":
 
             if len(episode_memory) >= min_epi_num:
                 # collecting loss for logging
-                loss = train(
+                loss, spr_loss = train(
                     Q,
                     Q_target,
                     projector,
@@ -605,6 +347,9 @@ if __name__ == "__main__":
                     optimizer=optimizer,
                     batch_size=args.batch_size,
                 )
+
+                if spr_loss != 0.0:
+                    spr_losses.append(spr_loss)
 
                 # function already returns the float
                 losses.append(loss)
@@ -637,7 +382,15 @@ if __name__ == "__main__":
         # Log the reward
         writer.add_scalar("Rewards per episodes", score, i)
         writer.add_scalar("Loss per episode", np.mean(losses), i)
+        writer.add_scalar("SPR Loss per episode", np.mean(spr_losses), i)
+
         score = 0
+
+    # f1 = plt.figure()
+    # plt.plot(np.arange(len(losses)), losses, label="loss")
+    # plt.xlabel("Episodes")
+    # plt.ylabel("Loss")
+    # plt.savefig(f"./plots/spr_rl/k_{args.k_steps}_loss_{args.loss_fn}")
 
     writer.close()
     env.close()
