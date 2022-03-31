@@ -7,6 +7,7 @@ import pickle
 import os
 
 import numpy as np
+from networks.drqn import Q_net
 
 
 class EpisodeBatch(dict):
@@ -80,15 +81,40 @@ class SequenceReplayMemory:
 
 if __name__ == "__main__":
     args = SN()
-    args.episodes = 50000
-    args.save_loc = "./buffer/random_agent.pkl"
+    args.episodes = 1e6
+    args.use_trained = True
+    args.save_loc = "./buffer/trained_experience.pkl"
     args.game = "CartPole-v0"
-    args.mem_size = 20000
+    args.mem_size = 3e6
 
     env = gym.make(args.game)
 
+    # agent related params
+    args.hidden_space = 64
+    args.tran1_dim = 256
+    args.tran2_dim = 128
+    args.action_space = 1 if args.game == "CartPole-v1" else env.action_space.n
+    args.projection_out_dim = 16
+    args.prediction_dim = 32
+    args.grad_norm_clip = 10
+    args.batch_size = 64
+    args.lr = 5e-5
+    args.tau = 1e-2
+    args.spr_weight = 0.001
+    args.k_steps = 3
+    args.use_spr = True
+    args.loss_fn = "L1"
+    args.device = th.device("cuda:1")
+
     args.input_shape = env.observation_space.shape[0]
     args.maxlen = 200
+
+    if args.use_trained:
+        agent = Q_net(
+            args,
+            state_space=env.observation_space.shape[0],
+            action_space=env.action_space.n,
+        ).to(args.device)
 
     replay_memory = SequenceReplayMemory(args)
 
@@ -98,8 +124,11 @@ if __name__ == "__main__":
 
         done = False
         while not done:
-            action = env.action_space.sample()
-            observation, reward, done, _ = env.step(action)
+            if args.use_trained:
+                pass
+            else:
+                action = env.action_space.sample()
+                observation, reward, done, _ = env.step(action)
             ep_info["obs"].append(observation)
             ep_info["reward"].append(reward)
             ep_info["done"].append(done)
